@@ -7,7 +7,7 @@ def extract_frames(
     video_path: str,
     output_dir: str,
     num_frames: int = 150,
-    resize: tuple[int, int] | None = ((800, 450)),
+    resize: tuple[int, int] | None = (800, 450),
 ) -> list[str]:
     """
     Extract the frame from the image by uniform sampling.
@@ -26,7 +26,7 @@ def extract_frames(
 
     video = cv.VideoCapture(video_path)
     if not video.isOpened():
-        raise ValueError(f"Not found video.: {video_path}")
+        raise ValueError(f"Video not found.: {video_path}")
 
     total_frames = int(video.get(cv.CAP_PROP_FRAME_COUNT))
     fps = video.get(cv.CAP_PROP_FPS)
