@@ -1,7 +1,8 @@
 import json
+from pathlib import Path
+
 import numpy as np
 import pycolmap
-from pathlib import Path
 
 
 def run_reconstruction(image_dir: str, output_dir: str) -> pycolmap.Reconstruction:
@@ -50,6 +51,7 @@ def run_reconstruction(image_dir: str, output_dir: str) -> pycolmap.Reconstructi
 
 def reconstruction_to_transforms(
     reconstruction: pycolmap.Reconstruction,
+    image_dir: str,
     output_path: str,
 ) -> dict:
     """
@@ -57,15 +59,16 @@ def reconstruction_to_transforms(
 
     Args:
         reconstruction: pycolmap Reconstruction object
+        image_dir: dir containing input frames (for file_path reference)
         output_path: path to save transforms.json
 
     Returns:
         transforms dict
     """
     frames = []
+    image_dir_path = Path(image_dir).resolve()
 
     for _, image in reconstruction.images.items():
-        camera = reconstruction.cameras[image.camera_id]
 
         # c2w (camera-to-world) matrix
         # pycolmap stores w2c, so inverse is needed
@@ -78,31 +81,16 @@ def reconstruction_to_transforms(
 
         c2w = np.linalg.inv(w2c)
 
-        """
-        R (3×3)          t (3,)
-        [ R00 R01 R02 ]  [ t0 ]
-        [ R10 R11 R12 ]  [ t1 ]
-        [ R20 R21 R22 ]  [ t2 ]
-
-        w2c[:3,:3] = R| w2c[:3,3] = t
-        [ R00 R01 R02 | t0 ]
-        [ R10 R11 R12 | t1 ]
-        [ R20 R21 R22 | t2 ]
-        [  0   0   0  |  1 ]
-
-        R → Rᵀ          t → -Rᵀt
-        [ R00 R10 R20 | tx ]
-        [ R01 R11 R21 | ty ]
-        [ R02 R12 R22 | tz ]
-        [  0   0   0  |  1 ]
-        """
-
         # flip y and z axis (OpenCV -> OpenGL convention)
         c2w[:, 1] *= -1
         c2w[:, 2] *= -1
 
+        # store absolute path to avoid resolution issues
+        frame_stem = Path(image.name).stem
+        frame_path = str(image_dir_path / frame_stem)
+
         frame = {
-            "file_path": f"./frames/{Path(image.name).stem}",
+            "file_path": frame_path,
             "transform_matrix": c2w.tolist(),
         }
         frames.append(frame)
@@ -143,6 +131,7 @@ def run_colmap_pipeline(image_dir: str, output_dir: str) -> dict:
     transforms_path = Path(output_dir) / "transforms.json"
     transforms = reconstruction_to_transforms(
         reconstruction=reconstruction,
+        image_dir=image_dir,
         output_path=str(transforms_path),
     )
 
