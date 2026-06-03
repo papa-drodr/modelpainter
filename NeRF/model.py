@@ -83,7 +83,7 @@ class NeRF(nn.Module):
         pos_dim = 3 + 2 * pos_freqs * 3  # 3 + 2*10*3 = 63
         dir_dim = 3 + 2 * dir_freqs * 3  # 3 + 2*4*3 = 27
 
-        # positional MLP (density brach)
+        # positional MLP (density branch)
         self.pts_layers = nn.ModuleList()
         for i in range(num_layers):
             if i == 0:
@@ -100,7 +100,7 @@ class NeRF(nn.Module):
         # feature vector for color branch
         self.feature_head = nn.Linear(hidden_dim, hidden_dim)
 
-        # direction MLP (color brach)
+        # direction MLP (color branch)
         self.color_layers = nn.Sequential(
             nn.Linear(hidden_dim + dir_dim, hidden_dim // 2),
             nn.ReLU(),

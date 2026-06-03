@@ -28,7 +28,7 @@ def run_reconstruction(image_dir: str, output_dir: str) -> pycolmap.Reconstructi
     )
 
     print("---Matching features---")
-    pycolmap.match_exhaustive(database_path=str(db_path))
+    pycolmap.match_sequential(database_path=str(db_path))
 
     print("---Running incremental mapping---")
     reconstructions = pycolmap.incremental_mapping(
@@ -72,8 +72,8 @@ def reconstruction_to_transforms(
 
         # c2w (camera-to-world) matrix
         # pycolmap stores w2c, so inverse is needed
-        R = image.rotation_matrix()  # 3x3 rotation (world-to-camera)
-        t = image.tvec  # 3, translation (world-to-camera)
+        R = image.cam_from_world().rotation.matrix()  # 3x3 rotation (world-to-camera)
+        t = image.cam_from_world().translation  # 3, translation (world-to-camera)
 
         w2c = np.eye(4)
         w2c[:3, :3] = R

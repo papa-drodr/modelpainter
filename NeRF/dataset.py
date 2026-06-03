@@ -1,28 +1,29 @@
 import json
-import torch
-import numpy as np
-from torch.utils.data import Dataset
+import random
 from pathlib import Path
+
+import numpy as np
+import torch
 from PIL import Image
+from torch.utils.data import Dataset
 
 
 def get_rays(
     H: int, W: int, focal: float, c2w: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Generate rays for each pixel in the image
+    Generate rays for each pixel in the image.
 
     Args:
         H: image height
-        W: image widtj
+        W: image width
         focal: focal length
         c2w: camera-to-world matrix (4x4)
 
-    Return:
+    Returns:
         rays_o: ray origins (H, W, 3)
-        rays_d: rat directions (H, W, 3)
+        rays_d: ray directions (H, W, 3)
     """
-
     # pixel grid
     i, j = torch.meshgrid(
         torch.arange(W, dtype=torch.float32),
@@ -33,14 +34,14 @@ def get_rays(
     # ray direction in camera coordinate
     dirs = torch.stack(
         [
-            (i - W * 0, 5) / focal,
-            -(j - H * 0.5) / focal,  # flip i-axis (OpenGL convention)
+            (i - W * 0.5) / focal,
+            -(j - H * 0.5) / focal,  # flip y-axis (OpenGL convention)
             -torch.ones_like(i),  # z points forward
         ],
-        dim=1,
+        dim=-1,
     )  # (H, W, 3)
 
-    # transform to world coodinate using c2w
+    # transform to world coordinate using c2w
     rays_d = (dirs[..., None, :] * c2w[:3, :3]).sum(dim=-1)  # (H, W, 3)
     rays_o = c2w[:3, 3].expand(rays_d.shape)  # (H, W, 3)
 
@@ -49,20 +50,20 @@ def get_rays(
 
 class NeRFDataset(Dataset):
     """
-    NeRF dataset loading transform.json and corresponding images
+    NeRF dataset loading transforms.json and corresponding images.
     """
 
     def __init__(
         self,
         data_dir: str,
         split: str = "train",
-        img_size: tuple[int, int] = ((800, 450)),
+        img_size: tuple[int, int] = (800, 450),
     ):
         """
         Args:
-            data_dir: dir containing transform.json and frames
+            data_dir: directory containing transforms.json and frames/
             split: "train" or "val"
-            img_size:(width, height) to resize images
+            img_size: (width, height) to resize images
         """
         self.data_dir = Path(data_dir)
         self.img_W, self.img_H = img_size
@@ -73,17 +74,20 @@ class NeRFDataset(Dataset):
             transforms = json.load(f)
 
         # compute focal length from camera angle
-        camera_angle_x = transforms_path["camera_angle_x"]
+        camera_angle_x = transforms["camera_angle_x"]
         self.focal = 0.5 * self.img_W / np.tan(0.5 * camera_angle_x)
 
         frames = transforms["frames"]
 
-        # train / val split (9:1)
-        split_idx = int(len(frames) * 0.9)
+        # random train / val split (9:1), fixed seed for reproducibility
+        indices = list(range(len(frames)))
+        random.seed(42)
+        random.shuffle(indices)
+        split_idx = int(len(indices) * 0.9)
         if split == "train":
-            frames = frames[:split_idx]
+            frames = [frames[i] for i in indices[:split_idx]]
         else:
-            frames = frames[split_idx:]
+            frames = [frames[i] for i in indices[split_idx:]]
 
         print(f"[{split}] {len(frames)} frames loaded.")
 
@@ -92,7 +96,7 @@ class NeRFDataset(Dataset):
         self.rgbs = []
 
         for frame in frames:
-            img_path = self.data_dir / (frame["file_path"] + ".jpg")
+            img_path = Path(frame["file_path"] + ".jpg")
             c2w = torch.tensor(frame["transform_matrix"], dtype=torch.float32)
 
             # load and resize image
