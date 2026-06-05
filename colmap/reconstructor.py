@@ -96,7 +96,8 @@ def reconstruction_to_transforms(
         frames.append(frame)
 
     # compute camera_angle_x from focal length
-    # assume PINHOLE model (params[0] = focal length)
+    if not reconstruction.cameras:
+        raise RuntimeError("COLMAP camera estimation failed: cameras dict is empty.")
     camera = list(reconstruction.cameras.values())[0]
     focal_length = camera.focal_length
     width = camera.width
