@@ -6,15 +6,31 @@ import torch
 from NeRF.model import NeRF
 
 
+def _compute_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Compute outward-facing unit normals for each face."""
+    v0 = vertices[faces[:, 0]]
+    v1 = vertices[faces[:, 1]]
+    v2 = vertices[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0)  # (F, 3)
+    norms = np.linalg.norm(normals, axis=-1, keepdims=True)
+    norms = np.where(norms < 1e-8, 1.0, norms)  # avoid divide-by-zero
+    return (normals / norms).astype(np.float32)
+
+
 def bake_face_colors(
     model: NeRF,
     vertices: np.ndarray,
     faces: np.ndarray,
     device: str = "cuda",
     batch_size: int = 65536,
+    num_dirs: int = 16,
 ) -> np.ndarray:
     """
-    Bake NeRF colors onto mesh faces by querying color at each face centroid.
+    Bake NeRF colors onto mesh faces by averaging over multiple hemisphere directions.
+
+    Queries the NeRF at each face centroid from num_dirs random directions in the
+    upper hemisphere (aligned with face normal) and averages to reduce view-dependent
+    noise and approximate diffuse surface color.
 
     Args:
         model: trained NeRF model
@@ -22,6 +38,7 @@ def bake_face_colors(
         faces: mesh face indices (F, 3)
         device: compute device
         batch_size: number of face centroids per forward pass
+        num_dirs: number of random hemisphere directions to average
 
     Returns:
         face_colors: RGB color per face (F, 3), values in [0, 1]
@@ -29,31 +46,32 @@ def bake_face_colors(
     model.eval()
 
     centroids = vertices[faces].mean(axis=1)  # (F, 3)
+    normals = _compute_face_normals(vertices, faces)  # (F, 3) unit normals
+
+    F = len(centroids)
     centroids_tensor = torch.tensor(centroids, dtype=torch.float32)
+    colors_acc = np.zeros((F, 3), dtype=np.float32)
 
-    # query from 6 cardinal directions and average to avoid winding/normal issues
-    view_dirs = torch.tensor([
-        [ 1, 0, 0], [-1, 0, 0],
-        [ 0, 1, 0], [ 0, -1, 0],
-        [ 0, 0, 1], [ 0, 0, -1],
-    ], dtype=torch.float32)
-
-    accumulated = np.zeros((len(centroids), 3), dtype=np.float32)
+    # sample num_dirs random unit vectors in upper hemisphere per face
+    raw = np.random.randn(num_dirs, F, 3).astype(np.float32)
+    norms = np.linalg.norm(raw, axis=-1, keepdims=True)
+    raw /= np.where(norms < 1e-8, 1.0, norms)
+    # flip vectors that point away from face normal
+    dots = (raw * normals[None]).sum(axis=-1, keepdims=True)  # (num_dirs, F, 1)
+    sampled_dirs = np.where(dots < 0, -raw, raw)  # (num_dirs, F, 3)
 
     with torch.no_grad():
-        for d in range(6):
-            dir_vec = view_dirs[d].unsqueeze(0).expand(len(centroids), -1)
-            colors_d = []
-            for i in range(0, len(centroids_tensor), batch_size):
+        for d in range(num_dirs):
+            dirs_tensor = torch.tensor(sampled_dirs[d], dtype=torch.float32)
+            for i in range(0, F, batch_size):
                 pts = centroids_tensor[i : i + batch_size].to(device)
-                dirs = dir_vec[i : i + batch_size].to(device)
+                dirs = dirs_tensor[i : i + batch_size].to(device)
                 rgb, _ = model(pts, dirs)
-                colors_d.append(rgb.cpu().numpy())
-            accumulated += np.concatenate(colors_d, axis=0)
+                colors_acc[i : i + batch_size] += rgb.cpu().numpy()
 
-    face_colors = accumulated / 6.0
+    face_colors = np.clip(colors_acc / num_dirs, 0.0, 1.0)
 
-    print(f"Color baking done: {len(face_colors)} faces (6-dir average)")
+    print(f"Color baking done: {len(face_colors)} faces ({num_dirs} directions averaged)")
 
     return face_colors
 

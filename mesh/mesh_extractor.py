@@ -2,10 +2,47 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy import ndimage
+from scipy import ndimage, sparse
 from skimage import measure
 
 from NeRF.model import NeRF
+
+
+def laplacian_smooth(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    iterations: int = 3,
+) -> np.ndarray:
+    """
+    Laplacian mesh smoothing: move each vertex toward the average of its neighbors.
+
+    Args:
+        vertices: (V, 3) mesh vertices
+        faces: (F, 3) face indices
+        iterations: number of smoothing passes
+
+    Returns:
+        smoothed vertices (V, 3)
+    """
+    V = len(vertices)
+    # build symmetric adjacency via all face edges
+    i0 = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    i1 = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    rows = np.concatenate([i0, i1])
+    cols = np.concatenate([i1, i0])
+    data = np.ones(len(rows), dtype=np.float32)
+
+    # row-normalized Laplacian matrix
+    L = sparse.csr_matrix((data, (rows, cols)), shape=(V, V))
+    row_sums = np.asarray(L.sum(axis=1)).flatten()
+    row_sums[row_sums == 0] = 1.0
+    inv_diag = sparse.diags(1.0 / row_sums)
+    L = inv_diag.dot(L)
+
+    verts = vertices.astype(np.float64)
+    for _ in range(iterations):
+        verts = L.dot(verts)
+    return verts.astype(np.float32)
 
 
 def extract_density_field(
@@ -46,7 +83,7 @@ def extract_density_field(
             dirs_batch = dirs[i : i + batch_size].to(device)
 
             _, density = model(pts_batch, dirs_batch)
-            density = torch.relu(density).squeeze(-1)  # (batch,)
+            density = density.squeeze(-1)  # (batch,), non-negative from model
             density_values.append(density.cpu())
 
     density_grid = torch.cat(density_values).reshape(resolution, resolution, resolution)
@@ -59,7 +96,8 @@ def extract_mesh(
     output_path: str,
     resolution: int = 128,
     bound: float = 3.0,
-    threshold: float = 10.0,
+    threshold: float | None = None,
+    smooth_iter: int = 3,
     device: str = "cuda",
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -70,7 +108,8 @@ def extract_mesh(
         output_path: path to save .obj file
         resolution: density grid resolution
         bound: scene bound
-        threshold: density threshold for surface extraction (isosurface level)
+        threshold: density isosurface level (auto = 95th percentile if None)
+        smooth_iter: Laplacian smoothing iterations (0 = no smoothing)
         device: compute device
 
     Returns:
@@ -79,6 +118,15 @@ def extract_mesh(
     """
     print(f"Extracting density field at resolution {resolution}^3...")
     density_grid = extract_density_field(model, resolution, bound, device=device)
+
+    dmax = float(density_grid.max())
+    if threshold is None:
+        threshold = max(float(np.percentile(density_grid, 95)), 0.01)
+        print(f"Adaptive threshold: {threshold:.4f} (95th percentile, density max={dmax:.2f})")
+    elif threshold >= dmax:
+        old = threshold
+        threshold = max(float(np.percentile(density_grid, 95)), 0.01)
+        print(f"Warning: --threshold {old:.1f} > density max {dmax:.2f}, using adaptive {threshold:.4f}")
 
     # remove floaters: keep only the largest connected component
     binary = density_grid > threshold
@@ -94,6 +142,10 @@ def extract_mesh(
 
     # normalize vertices from grid coords to world coords
     vertices = vertices / (resolution - 1) * 2 * bound - bound  # [-bound, bound]
+
+    if smooth_iter > 0:
+        print(f"Applying Laplacian smoothing ({smooth_iter} iterations)...")
+        vertices = laplacian_smooth(vertices, faces, iterations=smooth_iter)
 
     print(f"Mesh extracted: {len(vertices)} vertices, {len(faces)} faces")
 
