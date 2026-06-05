@@ -32,6 +32,12 @@ def parse_args():
         "--batch_size", type=int, default=4096, help="Rays per batch"
     )
     parser.add_argument(
+        "--rays_per_epoch",
+        type=int,
+        default=None,
+        help="Max rays sampled per epoch (None = use all). Use to speed up large datasets.",
+    )
+    parser.add_argument(
         "--img_size",
         type=int,
         nargs=2,
@@ -57,8 +63,14 @@ def parse_args():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=10.0,
-        help="Density threshold for mesh extraction",
+        default=None,
+        help="Density threshold for mesh extraction (auto 95th percentile if not set)",
+    )
+    parser.add_argument(
+        "--smooth_iter",
+        type=int,
+        default=3,
+        help="Laplacian smoothing iterations after Marching Cubes (0 = off)",
     )
     parser.add_argument(
         "--skip_extract", action="store_true", help="Skip frame extraction"
@@ -145,6 +157,7 @@ def main():
             far=args.far,
             img_size=tuple(args.img_size),
             resume_from=args.resume,
+            rays_per_epoch=args.rays_per_epoch,
             device=device,
         )
 
@@ -156,9 +169,15 @@ def main():
         output_path=str(mesh_path),
         resolution=args.resolution,
         threshold=args.threshold,
+        smooth_iter=args.smooth_iter,
         bound=bound,
         device=device,
     )
+    if len(vertices) == 0 or len(faces) == 0:
+        raise RuntimeError(
+            "메시 추출 실패: 빈 표면입니다. "
+            "--threshold 값을 낮추거나 NeRF 학습을 더 진행하세요."
+        )
 
     # step 5: color baking
     print("\n=== Step 5: Color Baking ===")
