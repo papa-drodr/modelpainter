@@ -1,6 +1,7 @@
 """
 Flask + Three.js based 3D mesh viewer with per-face color editing.
 """
+
 import threading
 import webbrowser
 from pathlib import Path
@@ -14,9 +15,9 @@ app = Flask(__name__)
 
 # --- global state ---
 _state = {
-    'editor': None,
-    'output_path': None,
-    'history': [],
+    "editor": None,
+    "output_path": None,
+    "history": [],
 }
 
 
@@ -33,7 +34,7 @@ def parse_colored_obj(obj_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray
         face_colors: (F, 3) RGB in [0, 1]
     """
     obj_path = Path(obj_path)
-    mtl_path = obj_path.with_suffix('.mtl')
+    mtl_path = obj_path.with_suffix(".mtl")
 
     materials = {}
     if mtl_path.exists():
@@ -41,11 +42,15 @@ def parse_colored_obj(obj_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray
         with open(mtl_path) as f:
             for line in f:
                 line = line.strip()
-                if line.startswith('newmtl '):
+                if line.startswith("newmtl "):
                     current_mtl = line.split()[1]
-                elif line.startswith('Kd ') and current_mtl:
+                elif line.startswith("Kd ") and current_mtl:
                     parts = line.split()
-                    materials[current_mtl] = [float(parts[1]), float(parts[2]), float(parts[3])]
+                    materials[current_mtl] = [
+                        float(parts[1]),
+                        float(parts[2]),
+                        float(parts[3]),
+                    ]
 
     vertices = []
     faces = []
@@ -55,14 +60,14 @@ def parse_colored_obj(obj_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray
     with open(obj_path) as f:
         for line in f:
             line = line.strip()
-            if line.startswith('v '):
+            if line.startswith("v "):
                 parts = line.split()
                 vertices.append([float(p) for p in parts[1:4]])
-            elif line.startswith('usemtl '):
+            elif line.startswith("usemtl "):
                 current_color = materials.get(line.split()[1], [0.8, 0.8, 0.8])
-            elif line.startswith('f '):
+            elif line.startswith("f "):
                 parts = line.split()
-                face = [int(p.split('/')[0]) - 1 for p in parts[1:4]]
+                face = [int(p.split("/")[0]) - 1 for p in parts[1:4]]
                 faces.append(face)
                 face_colors.append(current_color[:])
 
@@ -73,14 +78,14 @@ def parse_colored_obj(obj_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray
     )
 
 
-@app.route('/')
+@app.route("/")
 def index():
-    return HTML_TEMPLATE, 200, {'Content-Type': 'text/html; charset=utf-8'}
+    return HTML_TEMPLATE, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route('/api/mesh')
+@app.route("/api/mesh")
 def get_mesh():
-    editor = _state['editor']
+    editor = _state["editor"]
     verts = editor.vertices
     faces = editor.faces
     colors = editor.face_colors
@@ -88,72 +93,74 @@ def get_mesh():
     positions = verts[faces].reshape(-1, 3)
     vertex_colors = np.repeat(colors, 3, axis=0)
 
-    return jsonify({
-        'positions': positions.flatten().tolist(),
-        'colors': vertex_colors.flatten().tolist(),
-        'face_count': int(len(faces)),
-    })
+    return jsonify(
+        {
+            "positions": positions.flatten().tolist(),
+            "colors": vertex_colors.flatten().tolist(),
+            "face_count": int(len(faces)),
+        }
+    )
 
 
-@app.route('/api/color', methods=['POST'])
+@app.route("/api/color", methods=["POST"])
 def apply_color():
     data = request.json
-    face_indices = data['face_indices']
-    rgb = data['rgb']
+    face_indices = data["face_indices"]
+    rgb = data["rgb"]
 
-    editor = _state['editor']
-    _state['history'].append(
+    editor = _state["editor"]
+    _state["history"].append(
         (list(face_indices), editor.face_colors[face_indices].copy())
     )
 
     editor.set_rgb(face_indices, tuple(rgb))
-    return jsonify({'status': 'ok'})
+    return jsonify({"status": "ok"})
 
 
-@app.route('/api/adjust', methods=['POST'])
+@app.route("/api/adjust", methods=["POST"])
 def adjust():
     """Apply HSV adjustment to selected faces."""
     data = request.json
-    face_indices = data['face_indices']
-    kind = data['kind']   # 'hue' | 'brightness' | 'saturation'
-    value = float(data['value'])
+    face_indices = data["face_indices"]
+    kind = data["kind"]  # 'hue' | 'brightness' | 'saturation'
+    value = float(data["value"])
 
-    editor = _state['editor']
-    _state['history'].append(
+    editor = _state["editor"]
+    _state["history"].append(
         (list(face_indices), editor.face_colors[face_indices].copy())
     )
 
-    if kind == 'hue':
+    if kind == "hue":
         editor.shift_hue(face_indices, value)
-    elif kind == 'brightness':
+    elif kind == "brightness":
         editor.adjust_brightness(face_indices, value)
-    elif kind == 'saturation':
+    elif kind == "saturation":
         editor.adjust_saturation(face_indices, value)
 
     vertex_colors = np.repeat(editor.face_colors, 3, axis=0)
-    return jsonify({'colors': vertex_colors.flatten().tolist()})
+    return jsonify({"colors": vertex_colors.flatten().tolist()})
 
 
-@app.route('/api/undo', methods=['POST'])
+@app.route("/api/undo", methods=["POST"])
 def undo():
-    if not _state['history']:
-        return jsonify({'status': 'nothing to undo'})
+    if not _state["history"]:
+        return jsonify({"status": "nothing to undo"})
 
-    editor = _state['editor']
-    face_ids, prev_colors = _state['history'].pop()
+    editor = _state["editor"]
+    face_ids, prev_colors = _state["history"].pop()
     editor.face_colors[face_ids] = prev_colors
 
     vertex_colors = np.repeat(editor.face_colors, 3, axis=0)
-    return jsonify({'colors': vertex_colors.flatten().tolist()})
+    return jsonify({"colors": vertex_colors.flatten().tolist()})
 
 
-@app.route('/api/save', methods=['POST'])
+@app.route("/api/save", methods=["POST"])
 def save():
-    editor = _state['editor']
-    output_path = _state['output_path']
+    editor = _state["editor"]
+    output_path = _state["output_path"]
     editor.save(output_path)
     print(f"Saved -> {output_path}")
-    return jsonify({'status': 'saved', 'path': str(output_path)})
+    return jsonify({"status": "saved", "path": str(output_path)})
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -485,20 +492,21 @@ def launch_viewer(obj_path: str, output_path: str = None, port: int = 5000):
     """
     if output_path is None:
         stem = Path(obj_path).stem
-        output_path = str(Path(obj_path).parent / (stem + '_edited.obj'))
+        output_path = str(Path(obj_path).parent / (stem + "_edited.obj"))
 
     print(f"Loading mesh from {obj_path} ...")
     vertices, faces, face_colors = parse_colored_obj(obj_path)
     print(f"Loaded: {len(vertices)} vertices, {len(faces)} faces")
 
-    _state['editor'] = ColorEditor(vertices, faces, face_colors)
-    _state['output_path'] = output_path
-    _state['history'] = []
+    _state["editor"] = ColorEditor(vertices, faces, face_colors)
+    _state["output_path"] = output_path
+    _state["history"] = []
 
     def _open():
         import time
+
         time.sleep(1.5)
-        webbrowser.open(f'http://localhost:{port}')
+        webbrowser.open(f"http://localhost:{port}")
 
     threading.Thread(target=_open, daemon=True).start()
 
@@ -508,8 +516,8 @@ def launch_viewer(obj_path: str, output_path: str = None, port: int = 5000):
     app.run(port=port, debug=False, use_reloader=False)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     launch_viewer(
-        obj_path='./output/mesh/mesh_colored.obj',
-        output_path='./output/mesh/mesh_edited.obj',
+        obj_path="./output/mesh/mesh_colored.obj",
+        output_path="./output/mesh/mesh_edited.obj",
     )
