@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from NeRF.model import NeRF
 
 
@@ -53,6 +52,7 @@ def volume_rendering(
     density: torch.Tensor,
     t_vals: torch.Tensor,
     rays_d: torch.Tensor,
+    background: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Perform volume rendering to composite colors along each ray.
@@ -62,6 +62,7 @@ def volume_rendering(
         density: predicted density at each sample (N, num_samples, 1)
         t_vals: sample distances along ray (N, num_samples)
         rays_d: ray directions (N, 3) for computing real distances
+        background: background color blended for unoccupied rays (0=black, 1=white)
 
     Returns:
         rgb_map: rendered color per ray (N, 3)
@@ -79,22 +80,25 @@ def volume_rendering(
     dists = dists * rays_d.norm(dim=-1, keepdim=True)  # (N, num_samples)
 
     # alpha = 1 - exp(-sigma * delta)
-    sigma = F.relu(density[..., 0])  # (N, num_samples), clamp negative density
+    sigma = density[..., 0]  # (N, num_samples), non-negative from model
     alpha = 1.0 - torch.exp(-sigma * dists)  # (N, num_samples)
 
-    # transmittance T_i = prod(1 - alpha_j) for j < i
-    transmittance = torch.cumprod(
-        torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=-1),
-        dim=-1,
-    )[
-        :, :-1
-    ]  # (N, num_samples)
+    # transmittance T_i = exp(-sum_{j<i} sigma_j * delta_j), log-space for stability
+    log_T = torch.cumsum(-sigma * dists, dim=-1)
+    log_T = torch.cat(
+        [torch.zeros_like(log_T[:, :1]), log_T[:, :-1]], dim=-1
+    )
+    transmittance = torch.exp(log_T)  # (N, num_samples)
 
     # weight = T_i * alpha_i
     weights = transmittance * alpha  # (N, num_samples)
 
     # composite color: sum of weighted RGB
     rgb_map = (weights[..., None] * rgb).sum(dim=1)  # (N, 3)
+
+    # blend unoccupied ray remainder with background color
+    acc = weights.sum(dim=-1, keepdim=True)  # (N, 1) accumulated opacity
+    rgb_map = rgb_map + (1.0 - acc) * background
 
     # depth map: expected distance along ray
     depth_map = (weights * t_vals).sum(dim=-1)  # (N,)
@@ -134,10 +138,11 @@ def sample_pdf(
     inds = torch.searchsorted(cdf.contiguous(), u, right=True)
     below = torch.clamp(inds - 1, min=0)
     above = torch.clamp(inds, max=cdf.shape[-1] - 1)
-    inds_g = torch.stack([below, above], dim=-1)  # (N, num_samples, 2)
-
-    cdf_g = torch.gather(cdf.unsqueeze(1).expand(-1, num_samples, -1), 2, inds_g)
-    bins_g = torch.gather(bins.float().unsqueeze(1).expand(-1, num_samples, -1), 2, inds_g)
+    # direct indexing avoids large (N, num_samples, num_coarse) expand tensors
+    row = torch.arange(cdf.shape[0], device=cdf.device).unsqueeze(1)  # (N, 1)
+    cdf_g = torch.stack([cdf[row, below], cdf[row, above]], dim=-1)
+    bins_f = bins.float()
+    bins_g = torch.stack([bins_f[row, below], bins_f[row, above]], dim=-1)
 
     denom = cdf_g[..., 1] - cdf_g[..., 0]
     denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
@@ -154,6 +159,7 @@ def render_rays(
     num_samples: int = 64,
     num_fine: int = 64,
     perturb: bool = True,
+    background: float = 1.0,
 ) -> dict:
     """
     Full rendering pipeline with hierarchical (coarse + fine) sampling.
@@ -167,12 +173,15 @@ def render_rays(
         num_samples: coarse samples per ray
         num_fine: fine samples per ray (0 = coarse only)
         perturb: add perturbation to samples during training
+        background: background color for unoccupied rays (0=black, 1=white)
 
     Returns:
         dict with rgb_map, rgb_map_coarse, depth_map, weights
     """
     # --- coarse pass ---
-    pts, t_vals = sample_points_along_rays(rays_o, rays_d, near, far, num_samples, perturb)
+    pts, t_vals = sample_points_along_rays(
+        rays_o, rays_d, near, far, num_samples, perturb
+    )
     N, S, _ = pts.shape
 
     pts_flat = pts.reshape(-1, 3)
@@ -180,7 +189,9 @@ def render_rays(
     rgb_flat, density_flat = model(pts_flat, dirs_flat)
     rgb_c = rgb_flat.reshape(N, S, 3)
     density_c = density_flat.reshape(N, S, 1)
-    rgb_map_coarse, depth_map, weights_c = volume_rendering(rgb_c, density_c, t_vals, rays_d)
+    rgb_map_coarse, depth_map, weights_c = volume_rendering(
+        rgb_c, density_c, t_vals, rays_d, background=background
+    )
 
     if num_fine == 0:
         return {
@@ -192,7 +203,9 @@ def render_rays(
     # --- fine pass ---
     t_mids = 0.5 * (t_vals[:, :-1] + t_vals[:, 1:])          # (N, S-1)
     t_fine = sample_pdf(t_mids, weights_c[:, 1:-1].detach(), num_fine, perturb)
-    t_all, _ = torch.sort(torch.cat([t_vals, t_fine], dim=-1), dim=-1)  # (N, S+num_fine)
+    t_all, _ = torch.sort(
+        torch.cat([t_vals, t_fine], dim=-1), dim=-1
+    )  # (N, S+num_fine)
 
     S_all = t_all.shape[1]
     pts_all = rays_o[:, None, :] + rays_d[:, None, :] * t_all[..., None]
@@ -201,7 +214,9 @@ def render_rays(
     rgb_flat, density_flat = model(pts_flat, dirs_flat)
     rgb_f = rgb_flat.reshape(N, S_all, 3)
     density_f = density_flat.reshape(N, S_all, 1)
-    rgb_map, depth_map, weights = volume_rendering(rgb_f, density_f, t_all, rays_d)
+    rgb_map, depth_map, weights = volume_rendering(
+        rgb_f, density_f, t_all, rays_d, background=background
+    )
 
     return {
         "rgb_map": rgb_map,              # fine result (N, 3)
@@ -223,4 +238,4 @@ if __name__ == "__main__":
     result = render_rays(model, rays_o, rays_d)
     print("rgb_map shape:", result["rgb_map"].shape)  # (1024, 3)
     print("depth_map shape:", result["depth_map"].shape)  # (1024,)
-    print("weights shape:", result["weights"].shape)  # (1024, 64)
+    print("weights shape:", result["weights"].shape)  # (1024, 128) = 64 coarse + 64 fine

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class PositionalEncoding(nn.Module):
@@ -38,10 +39,6 @@ class PositionalEncoding(nn.Module):
 
         return torch.cat(out, dim=-1)
 
-    def output_dim(self, input_dim: int = 3) -> int:
-        base = input_dim if self.include_input else 0
-        return base + 2 * self.num_freqs * input_dim
-
 
 class NeRF(nn.Module):
     """
@@ -49,7 +46,7 @@ class NeRF(nn.Module):
 
     Input:
         position (x, y, z) -> positional encoding -> MLP -> density + feature
-        direction (theta, phi) - > positional encoding -> MLP -> RGB
+        direction (dx, dy, dz) -> positional encoding -> MLP -> RGB
 
     Output:
         rgb: (3,) color
@@ -59,7 +56,7 @@ class NeRF(nn.Module):
     def __init__(
         self,
         pos_freqs: int = 10,
-        dir_freqs: int = 4,
+        dir_freqs: int = 6,
         hidden_dim: int = 256,
         num_layers: int = 8,
         skip_layer: int = 4,
@@ -81,7 +78,7 @@ class NeRF(nn.Module):
         self.dir_enc = PositionalEncoding(num_freqs=dir_freqs, include_input=True)
 
         pos_dim = 3 + 2 * pos_freqs * 3  # 3 + 2*10*3 = 63
-        dir_dim = 3 + 2 * dir_freqs * 3  # 3 + 2*4*3 = 27
+        dir_dim = 3 + 2 * dir_freqs * 3  # 3 + 2*6*3 = 39
 
         # positional MLP (density branch)
         self.pts_layers = nn.ModuleList()
@@ -124,7 +121,7 @@ class NeRF(nn.Module):
         """
         # positional encoding
         pts_enc = self.pos_enc(pts)  # (..., 63)
-        dirs_enc = self.dir_enc(dirs)  # (..., 27)
+        dirs_enc = self.dir_enc(dirs)  # (..., 39)
 
         # positional MLP forward
         h = pts_enc
@@ -133,8 +130,7 @@ class NeRF(nn.Module):
                 h = torch.cat([h, pts_enc], dim=-1)
             h = self.relu(layer(h))
 
-        # density (no activation: raw sigma, clipped in renderer)
-        density = self.density_head(h)  # (..., 1)
+        density = F.relu(self.density_head(h))  # (..., 1), non-negative sigma
 
         # feature vector
         feature = self.feature_head(h)  # (..., hidden_dim)

@@ -43,6 +43,7 @@ def get_rays(
 
     # transform to world coordinate using c2w
     rays_d = (dirs[..., None, :] * c2w[:3, :3]).sum(dim=-1)  # (H, W, 3)
+    rays_d = rays_d / rays_d.norm(dim=-1, keepdim=True)  # normalize to unit vectors
     rays_o = c2w[:3, 3].expand(rays_d.shape)  # (H, W, 3)
 
     return rays_o, rays_d
@@ -96,7 +97,9 @@ class NeRFDataset(Dataset):
         self.rgbs = []
 
         for frame in frames:
-            img_path = Path(frame["file_path"] + ".jpg")
+            img_path = self.data_dir / (frame["file_path"] + ".jpg")
+            if not img_path.exists():
+                raise FileNotFoundError(f"Image not found: {img_path}")
             c2w = torch.tensor(frame["transform_matrix"], dtype=torch.float32)
 
             # load and resize image

@@ -39,7 +39,7 @@ def extract_frames(
         output_dir: dir saving frames
         num_frames: number of frames to extract (default: 200)
         resize: (width, height) to resize images (default: (800, 450))
-        blur_threshold: frames with Laplacian variance below this are skipped (default: 100.0)
+        blur_threshold: frames with Laplacian variance below this are skipped
 
     Returns:
         list of saved frame paths
@@ -70,7 +70,8 @@ def extract_frames(
 
         if (frame_idx + 1) % 100 == 0:
             print(
-                f"  scanned {frame_idx + 1}/{total_frames} frames (non-blurry: {len(non_blurry_indices)})"
+                f"  scanned {frame_idx + 1}/{total_frames} frames "
+                f"(non-blurry: {len(non_blurry_indices)})"
             )
 
     print(f"Non-blurry frames: {len(non_blurry_indices)} / {total_frames}")
@@ -79,11 +80,10 @@ def extract_frames(
         raise RuntimeError("No non-blurry frames found. Try lowering blur_threshold.")
 
     if num_frames > len(non_blurry_indices):
-        print(
-            f"Requested {num_frames} frames exceeds non-blurry count ({len(non_blurry_indices)})."
-        )
-        print(f"Adjusting to {len(non_blurry_indices)}.")
-        num_frames = len(non_blurry_indices)
+        nb = len(non_blurry_indices)
+        print(f"Requested {num_frames} frames exceeds non-blurry count ({nb}).")
+        print(f"Adjusting to {nb}.")
+        num_frames = nb
 
     # step 2: uniform sampling from non-blurry frames
     sample_indices = np.linspace(0, len(non_blurry_indices) - 1, num_frames, dtype=int)
@@ -91,12 +91,13 @@ def extract_frames(
 
     # step 3: save sampled frames
     saved_paths = []
+    failed_count = 0
     for i, frame_idx in enumerate(selected_indices):
         video.set(cv.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = video.read()
 
         if not ret:
-            print(f"frame {frame_idx} read failed, skip")
+            failed_count += 1
             continue
 
         if resize is not None:
@@ -110,6 +111,13 @@ def extract_frames(
             print(f"  {i + 1}/{num_frames} frames saved")
 
     video.release()
+
+    if failed_count > 0:
+        print(
+            f"경고: {failed_count}개 프레임 저장 실패 "
+            f"(요청 {num_frames}개 중 {len(saved_paths)}개 저장됨)"
+        )
+
     print(f"\nTotal {len(saved_paths)} frames saved -> {output_dir}")
 
     return saved_paths
