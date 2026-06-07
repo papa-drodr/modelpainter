@@ -5,13 +5,13 @@ Given a single video, this program reconstructs a 3D model via NeRF and lets you
 
 ---
 
-![demo](image/opening.gif)
-![demo](image/painting.gif)
+<img src="image/opening.gif" width="100%"/>
+<img src="image/painting.gif" width="100%"/>
 
 ### Frames → Training
 | Before | After |
 |--------|-------|
-| <img src="image/frame.jpg" width="300"/> | <img src="image/frame_after.png" width="300"/> |
+| <img src="image/frame.jpg" width="100%"/> | <img src="image/frame_after.png" width="100%"/> |
 
 > **Common reasons reconstruction fails**
 > - **Motion blur** — moving the camera too fast smears frames and breaks pose estimation
@@ -24,7 +24,7 @@ Given a single video, this program reconstructs a 3D model via NeRF and lets you
 ### Color Editing — Before & After
 | Before | After |
 |--------|-------|
-| ![before](image/demo_before.png) | ![after](image/demo_after_1.png) |
+| <img src="image/demo_before.png" width="100%"/> | <img src="image/demo_after_1.png" width="100%"/> |
 
 **Pipeline Output Preview**
 | Stage | Output |
