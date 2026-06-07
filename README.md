@@ -11,7 +11,7 @@ Given a single video, this program reconstructs a 3D model via NeRF and lets you
 ### Frames → Training
 | Before | After |
 |--------|-------|
-| <img src="image/frame.jpg" width="100%"/> | <img src="image/frame_after.png" width="100%"/> |
+| <img src="image/frame.jpg" width="500"/> | <img src="image/frame_after.png" width="500"/> |
 
 > **Common reasons reconstruction fails**
 > - **Motion blur** — moving the camera too fast smears frames and breaks pose estimation
