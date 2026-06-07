@@ -1,4 +1,4 @@
 /output
 *pycache*
 input*
-.image/*.mp4
+/image/*.mp4
