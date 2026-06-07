@@ -2,6 +2,8 @@
 Flask + Three.js based 3D mesh viewer with per-face color editing.
 """
 
+# flake8: noqa: E501
+
 import threading
 import webbrowser
 from pathlib import Path
@@ -13,11 +15,11 @@ from editor.color_editor import ColorEditor
 
 app = Flask(__name__)
 
-# --- global state ---
 _state = {
     "editor": None,
     "output_path": None,
     "history": [],
+    "redo_stack": [],
 }
 
 
@@ -83,21 +85,52 @@ def index():
     return HTML_TEMPLATE, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route("/api/mesh")
-def get_mesh():
-    editor = _state["editor"]
-    verts = editor.vertices
-    faces = editor.faces
-    colors = editor.face_colors
+@app.route("/api/browse", methods=["POST"])
+def browse():
+    import tkinter as tk
+    from tkinter import filedialog
 
-    positions = verts[faces].reshape(-1, 3)
-    vertex_colors = np.repeat(colors, 3, axis=0)
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-alpha", 0)
+    root.attributes("-topmost", True)
+    root.update()
+    path = filedialog.askopenfilename(
+        title="Select OBJ File",
+        filetypes=[("OBJ files", "*.obj"), ("All files", "*.*")],
+    )
+    root.destroy()
+    return jsonify({"path": path or ""})
 
+
+@app.route("/api/load", methods=["POST"])
+def load_file():
+    path = request.json.get("path", "").strip()
+    p = Path(path)
+    if not p.exists():
+        return jsonify({"error": f"File not found: {path}"}), 404
+    if p.suffix.lower() != ".obj":
+        return jsonify({"error": "File must be a .obj"}), 400
+
+    try:
+        vertices, faces, face_colors = parse_colored_obj(str(p))
+    except Exception as e:
+        return jsonify({"error": f"Parse error: {e}"}), 500
+
+    output_path = str(p.parent / (p.stem + "_edited.obj"))
+    _state["editor"] = ColorEditor(vertices, faces, face_colors)
+    _state["output_path"] = output_path
+    _state["history"] = []
+    _state["redo_stack"] = []
+
+    positions = vertices[faces].reshape(-1, 3)
+    vertex_colors = np.repeat(face_colors, 3, axis=0)
     return jsonify(
         {
             "positions": positions.flatten().tolist(),
             "colors": vertex_colors.flatten().tolist(),
             "face_count": int(len(faces)),
+            "output_path": output_path,
         }
     )
 
@@ -112,6 +145,7 @@ def apply_color():
     _state["history"].append(
         (list(face_indices), editor.face_colors[face_indices].copy())
     )
+    _state["redo_stack"].clear()
 
     editor.set_rgb(face_indices, tuple(rgb))
     return jsonify({"status": "ok"})
@@ -119,7 +153,6 @@ def apply_color():
 
 @app.route("/api/adjust", methods=["POST"])
 def adjust():
-    """Apply HSV adjustment to selected faces."""
     data = request.json
     face_indices = data["face_indices"]
     kind = data["kind"]  # 'hue' | 'brightness' | 'saturation'
@@ -129,6 +162,7 @@ def adjust():
     _state["history"].append(
         (list(face_indices), editor.face_colors[face_indices].copy())
     )
+    _state["redo_stack"].clear()
 
     if kind == "hue":
         editor.shift_hue(face_indices, value)
@@ -148,7 +182,22 @@ def undo():
 
     editor = _state["editor"]
     face_ids, prev_colors = _state["history"].pop()
+    _state["redo_stack"].append((face_ids, editor.face_colors[face_ids].copy()))
     editor.face_colors[face_ids] = prev_colors
+
+    vertex_colors = np.repeat(editor.face_colors, 3, axis=0)
+    return jsonify({"colors": vertex_colors.flatten().tolist()})
+
+
+@app.route("/api/redo", methods=["POST"])
+def redo():
+    if not _state["redo_stack"]:
+        return jsonify({"status": "nothing to redo"})
+
+    editor = _state["editor"]
+    face_ids, next_colors = _state["redo_stack"].pop()
+    _state["history"].append((face_ids, editor.face_colors[face_ids].copy()))
+    editor.face_colors[face_ids] = next_colors
 
     vertex_colors = np.repeat(editor.face_colors, 3, axis=0)
     return jsonify({"colors": vertex_colors.flatten().tolist()})
@@ -169,44 +218,112 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <title>ModelPainter</title>
 <style>
+:root { --ac: #58a6ff; --ac-fg: #0d1117; }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; display:flex; height:100vh; overflow:hidden; }
+
+/* ── File load overlay ── */
+#loadOverlay { position:fixed; inset:0; background:#0d1117; display:flex; align-items:center; justify-content:center; z-index:100; transition:opacity .3s ease; }
+#loadOverlay.hidden { opacity:0; pointer-events:none; }
+#loadCard { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:36px 32px; width:500px; max-width:92vw; display:flex; flex-direction:column; gap:18px; box-shadow:0 8px 32px rgba(0,0,0,0.6); }
+#loadCard h2 { font-size:26px; font-weight:700; color:var(--ac); text-align:center; letter-spacing:0.5px; transition:color .5s ease; }
+#loadCard p { font-size:13px; color:#8b949e; text-align:center; line-height:1.6; }
+#loadInputRow { display:flex; gap:8px; }
+#loadPath { flex:1; padding:10px 12px; background:#0d1117; border:1px solid #30363d; border-radius:5px; color:#c9d1d9; font-size:13px; outline:none; transition:border-color .4s; }
+#loadPath:focus { border-color:var(--ac); }
+#loadPath::placeholder { color:#484f58; }
+#browseBtn { padding:10px 14px; background:transparent; border:1px solid var(--ac); border-radius:5px; color:var(--ac); font-size:13px; cursor:pointer; white-space:nowrap; transition:all .4s; }
+#browseBtn:hover { filter:brightness(1.2); }
+#loadBtn { padding:10px 20px; background:var(--ac); border:none; border-radius:5px; color:var(--ac-fg); font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; transition:background .4s, color .4s, filter .15s; }
+#loadBtn:hover { filter:brightness(1.15); }
+#loadBtn:disabled { filter:brightness(0.6); cursor:default; }
+#loadError { font-size:12px; color:#f85149; text-align:center; min-height:16px; }
+#recentList { display:flex; flex-direction:column; gap:4px; }
+.recent-item { padding:7px 10px; background:#0d1117; border:1px solid #30363d; border-radius:4px; font-size:12px; color:#8b949e; cursor:pointer; transition:all .12s; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.recent-item:hover { border-color:var(--ac); color:#c9d1d9; }
+.recent-label { font-size:10px; color:#484f58; text-transform:uppercase; letter-spacing:0.5px; font-weight:600; }
+
+/* ── Main viewer ── */
 #sidebar { width:230px; min-width:230px; background:#161b22; border-right:1px solid #30363d; padding:14px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
 #canvas-container { flex:1; position:relative; }
-h1 { font-size:15px; font-weight:600; color:#58a6ff; padding-bottom:10px; border-bottom:1px solid #30363d; }
+h1 { font-size:22px; font-weight:700; color:var(--ac); padding-bottom:10px; border-bottom:1px solid #30363d; text-align:center; letter-spacing:0.5px; transition:color .5s ease; }
 .section { display:flex; flex-direction:column; gap:6px; }
 .label { font-size:10px; color:#8b949e; text-transform:uppercase; letter-spacing:0.5px; font-weight:600; }
 .divider { border-top:1px solid #30363d; margin:2px 0; }
-input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-radius:5px; cursor:pointer; background:none; padding:2px; }
+input[type=color] { height:32px; border:1px solid #30363d; border-radius:5px; cursor:pointer; background:none; padding:2px; }
 .rgb-row { display:flex; gap:4px; }
-.rgb-col { flex:1; display:flex; flex-direction:column; gap:2px; text-align:center; }
-.rgb-col input { width:100%; padding:4px 2px; background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; font-size:12px; text-align:center; outline:none; }
-.rgb-col input:focus { border-color:#58a6ff; }
+.rgb-col { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; }
+.rgb-col input { width:100%; padding:4px 2px; background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; font-size:12px; text-align:center; outline:none; transition:border-color .4s; -moz-appearance:textfield; }
+.rgb-col input::-webkit-inner-spin-button, .rgb-col input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+.rgb-col input:focus { border-color:var(--ac); }
 .rgb-col span { font-size:10px; color:#8b949e; }
 .slider-row { display:flex; align-items:center; gap:6px; }
 .slider-label { font-size:11px; color:#8b949e; width:36px; flex-shrink:0; }
-.slider-row input[type=range] { flex:1; height:4px; accent-color:#e3912d; cursor:pointer; }
+.slider-row input[type=range] { flex:1; height:4px; accent-color:var(--ac); cursor:pointer; transition:accent-color .4s; }
 .slider-val { font-size:11px; color:#c9d1d9; width:34px; text-align:right; flex-shrink:0; font-variant-numeric:tabular-nums; }
-.btn { width:100%; padding:7px; border:none; border-radius:5px; cursor:pointer; font-size:12px; font-weight:500; transition:filter .15s; }
+.btn { width:100%; padding:7px; border:1px solid transparent; border-radius:5px; cursor:pointer; font-size:12px; font-weight:500; transition:background .4s ease, color .4s ease, border-color .4s ease, filter .15s; }
 .btn:hover { filter:brightness(1.15); }
-.btn-apply { background:#238636; color:#fff; }
-.btn-adj { background:#e3912d; color:#fff; }
-.btn-sub { background:#21262d; color:#c9d1d9; border:1px solid #30363d; }
-.btn-save { background:#1f6feb; color:#fff; }
+.btn-apply { background:var(--ac); color:var(--ac-fg); }
+.btn-adj { background:var(--ac); color:var(--ac-fg); }
+.btn-sub { background:transparent; color:var(--ac); border-color:var(--ac); opacity:0.8; }
+.btn-sub:hover { opacity:1; }
+.btn-save { background:var(--ac); color:var(--ac-fg); }
+.btn-open { background:transparent; color:var(--ac); border-color:var(--ac); opacity:0.5; }
+.btn-open:hover { opacity:0.8; }
+.btn-eye { background:transparent; color:var(--ac); border:1px solid var(--ac); flex:0 0 auto; width:36px; padding:0; display:flex; align-items:center; justify-content:center; transition:background .4s, color .4s, border-color .4s; }
+.btn-eye.active { background:var(--ac); color:var(--ac-fg); }
 .btn-row { display:flex; gap:4px; }
 .btn-row .btn { flex:1; }
+.color-row { display:flex; gap:4px; align-items:stretch; }
+.color-row input[type=color] { flex:1; width:auto; }
 .info { font-size:12px; color:#8b949e; line-height:2; margin-top:auto; }
 .info span { color:#c9d1d9; }
+.file-info { font-size:10px; color:#484f58; word-break:break-all; line-height:1.5; }
 #statusBar { position:absolute; bottom:12px; left:12px; background:rgba(22,27,34,0.92); border:1px solid #30363d; padding:5px 12px; border-radius:5px; font-size:11px; color:#8b949e; pointer-events:none; }
+#boxOverlay { position:absolute; border:1px dashed #58a6ff; background:rgba(88,166,255,0.08); pointer-events:none; display:none; }
+#helpBtn { position:absolute; top:12px; right:12px; width:28px; height:28px; background:#21262d; border:1px solid #30363d; border-radius:50%; color:#8b949e; font-size:14px; font-weight:700; cursor:pointer; z-index:10; transition:all .15s; display:flex; align-items:center; justify-content:center; }
+#helpBtn:hover { background:#30363d; color:#c9d1d9; border-color:#58a6ff; }
+#helpPanel { position:absolute; top:0; right:0; height:100%; width:260px; background:#161b22; border-left:1px solid #30363d; padding:16px; overflow-y:auto; transform:translateX(100%); transition:transform .22s cubic-bezier(.4,0,.2,1); z-index:9; }
+#helpPanel.open { transform:translateX(0); box-shadow:-8px 0 24px rgba(0,0,0,0.4); }
+#helpPanel h2 { font-size:13px; font-weight:600; color:#58a6ff; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #30363d; }
+.help-sec { margin-bottom:14px; }
+.help-sec h3 { font-size:10px; color:#8b949e; text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:5px; }
+.help-row { display:flex; justify-content:space-between; align-items:center; padding:4px 0; border-bottom:1px solid #21262d; gap:8px; }
+.help-key { font-size:10px; color:#e6edf3; background:#0d1117; padding:2px 6px; border-radius:3px; border:1px solid #30363d; white-space:nowrap; flex-shrink:0; }
+.help-desc { font-size:11px; color:#8b949e; text-align:right; }
 </style>
 </head>
 <body>
+
+<!-- File load overlay -->
+<div id="loadOverlay">
+  <div id="loadCard">
+    <h2>ModelPainter</h2>
+    <p>Enter the path to the .obj file you want to edit<br>
+       <span style="font-size:11px">NeRF mesh or any file produced by save_colored_obj</span></p>
+    <div id="loadInputRow">
+      <input type="text" id="loadPath" placeholder="Enter path or Browse..." autocomplete="off">
+      <button id="browseBtn" onclick="browseFile()">Browse</button>
+      <button id="loadBtn" onclick="loadFile()">Load</button>
+    </div>
+    <div id="loadError"></div>
+    <div id="recentSection" style="display:none">
+      <div class="recent-label" style="margin-bottom:6px">Recent files</div>
+      <div id="recentList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Main viewer -->
 <div id="sidebar">
-  <h1>ModelPainter</h1>
+  <h1 id="appTitle">ModelPainter</h1>
 
   <div class="section">
     <div class="label">Color</div>
-    <input type="color" id="colorPicker" value="#ff0000">
+    <div class="color-row">
+      <input type="color" id="colorPicker" value="#ff0000">
+      <button class="btn btn-eye" id="btnEye" onclick="toggleEyedropper()" title="Pick color from face (P)"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.354.646a1.207 1.207 0 0 0-1.708 0L8.5 3.793l-.646-.647a.5.5 0 1 0-.708.708L8.293 5l-7.147 7.146A.5.5 0 0 0 1 12.5v2a.5.5 0 0 0 .5.5h2a.5.5 0 0 0 .354-.146L11 7.707l1.146 1.147a.5.5 0 0 0 .708-.708l-.647-.646 3.147-3.146a1.207 1.207 0 0 0 0-1.708l-2-2zM2 13v-1.293l7-7L10.293 6l-7 7H2z"/></svg></button>
+    </div>
     <div class="rgb-row">
       <div class="rgb-col"><input type="number" id="inR" min="0" max="255" value="255"><span>R</span></div>
       <div class="rgb-col"><input type="number" id="inG" min="0" max="255" value="0"><span>G</span></div>
@@ -252,21 +369,65 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
       <button class="btn btn-sub" onclick="selectAll()">Select All</button>
       <button class="btn btn-sub" onclick="clearSelection()">Clear</button>
     </div>
-    <button class="btn btn-sub" onclick="undo()">Undo</button>
+    <button class="btn btn-sub" onclick="invertSelection()">Invert Selection</button>
+    <div class="btn-row">
+      <button class="btn btn-sub" onclick="undo()">Undo</button>
+      <button class="btn btn-sub" onclick="redo()">Redo</button>
+    </div>
   </div>
 
   <div class="divider"></div>
 
   <button class="btn btn-save" onclick="save()">Save</button>
+  <button class="btn btn-open" onclick="openFileOverlay()">Open Other File...</button>
 
   <div class="info">
     Selected: <span id="selCount">0</span> faces<br>
     Total: <span id="totalCount">-</span> faces
   </div>
+  <div class="file-info" id="fileInfo"></div>
 </div>
 
-<div id="canvas-container"></div>
-<div id="statusBar">Loading mesh...</div>
+<div id="canvas-container">
+  <div id="boxOverlay"></div>
+  <button id="helpBtn" onclick="toggleHelp()">?</button>
+  <div id="helpPanel">
+    <h2>ModelPainter Help</h2>
+    <div class="help-sec">
+      <h3>Mouse</h3>
+      <div class="help-row"><span class="help-key">LMB drag</span><span class="help-desc">Rotate</span></div>
+      <div class="help-row"><span class="help-key">MMB drag</span><span class="help-desc">Pan</span></div>
+      <div class="help-row"><span class="help-key">Scroll</span><span class="help-desc">Zoom</span></div>
+      <div class="help-row"><span class="help-key">Click</span><span class="help-desc">Select face</span></div>
+      <div class="help-row"><span class="help-key">Shift + click</span><span class="help-desc">Add to selection</span></div>
+      <div class="help-row"><span class="help-key">RMB drag</span><span class="help-desc">Box select</span></div>
+    </div>
+    <div class="help-sec">
+      <h3>Shortcuts</h3>
+      <div class="help-row"><span class="help-key">Ctrl+Z</span><span class="help-desc">Undo</span></div>
+      <div class="help-row"><span class="help-key">Ctrl+Y / Ctrl+Shift+Z</span><span class="help-desc">Redo</span></div>
+      <div class="help-row"><span class="help-key">Ctrl+S</span><span class="help-desc">Save</span></div>
+      <div class="help-row"><span class="help-key">Ctrl+A</span><span class="help-desc">Select all</span></div>
+      <div class="help-row"><span class="help-key">Esc</span><span class="help-desc">Deselect</span></div>
+      <div class="help-row"><span class="help-key">I</span><span class="help-desc">Invert selection</span></div>
+      <div class="help-row"><span class="help-key">P</span><span class="help-desc">Toggle eyedropper</span></div>
+    </div>
+    <div class="help-sec">
+      <h3>Color</h3>
+      <div class="help-row"><span class="help-key">Apply Color</span><span class="help-desc">Set color directly</span></div>
+      <div class="help-row"><span class="help-key">Hue slider</span><span class="help-desc">Shift hue ±180°</span></div>
+      <div class="help-row"><span class="help-key">Bright slider</span><span class="help-desc">Brightness ×0.1–3.0</span></div>
+      <div class="help-row"><span class="help-key">Sat slider</span><span class="help-desc">Saturation ×0.0–3.0</span></div>
+      <div class="help-row"><span class="help-key">Pick / P</span><span class="help-desc">Sample color from face</span></div>
+    </div>
+    <div class="help-sec">
+      <h3>File</h3>
+      <div class="help-row"><span class="help-key">Save / Ctrl+S</span><span class="help-desc">Save edited mesh</span></div>
+      <div class="help-row"><span class="help-key">Open Other File</span><span class="help-desc">Load a different file</span></div>
+    </div>
+  </div>
+</div>
+<div id="statusBar">Select a file to get started.</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -275,6 +436,7 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
     const statusBar = document.getElementById('statusBar');
     const selCountEl = document.getElementById('selCount');
     const totalCountEl = document.getElementById('totalCount');
+    const boxOverlay = document.getElementById('boxOverlay');
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -287,11 +449,13 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
     dirLight.position.set(2, 3, 4);
     scene.add(dirLight);
-    scene.add(new THREE.AxesHelper(0.5));
 
     const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.001, 1000);
 
     let isDragging = false;
+    let isPanning = false;
+    let isBoxSelecting = false;
+    let boxStart = { x: 0, y: 0 };
     let mouseDownPos = { x: 0, y: 0 };
     let prevMouse = { x: 0, y: 0 };
     let sph = { theta: 0, phi: Math.PI / 2.5, r: 5 };
@@ -300,17 +464,109 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
     function updateCamera() {
         const sx = Math.sin(sph.phi), cx = Math.cos(sph.phi);
         const sy = Math.sin(sph.theta), cy = Math.cos(sph.theta);
-        camera.position.set(orbitTarget.x + sph.r * sx * sy, orbitTarget.y + sph.r * cx, orbitTarget.z + sph.r * sx * cy);
+        camera.position.set(
+            orbitTarget.x + sph.r * sx * sy,
+            orbitTarget.y + sph.r * cx,
+            orbitTarget.z + sph.r * sx * cy
+        );
         camera.lookAt(orbitTarget);
     }
     updateCamera();
 
     const el = renderer.domElement;
-    el.addEventListener('mousedown', e => { isDragging = true; mouseDownPos = { x: e.clientX, y: e.clientY }; prevMouse = { x: e.clientX, y: e.clientY }; });
-    el.addEventListener('mousemove', e => { if (!isDragging) return; sph.theta -= (e.clientX - prevMouse.x) * 0.008; sph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, sph.phi - (e.clientY - prevMouse.y) * 0.008)); prevMouse = { x: e.clientX, y: e.clientY }; updateCamera(); });
-    el.addEventListener('mouseup', () => { isDragging = false; });
-    el.addEventListener('mouseleave', () => { isDragging = false; });
+
+    el.addEventListener('mousedown', e => {
+        mouseDownPos = { x: e.clientX, y: e.clientY };
+        prevMouse = { x: e.clientX, y: e.clientY };
+        if (e.button === 0) isDragging = true;
+        if (e.button === 1) { isPanning = true; e.preventDefault(); }
+        if (e.button === 2) {
+            isBoxSelecting = true;
+            boxStart = { x: e.clientX, y: e.clientY };
+            const rect = el.getBoundingClientRect();
+            boxOverlay.style.left = (e.clientX - rect.left) + 'px';
+            boxOverlay.style.top  = (e.clientY - rect.top)  + 'px';
+            boxOverlay.style.width  = '0px';
+            boxOverlay.style.height = '0px';
+            boxOverlay.style.display = 'block';
+        }
+    });
+
+    el.addEventListener('mousemove', e => {
+        if (isDragging) {
+            sph.theta -= (e.clientX - prevMouse.x) * 0.008;
+            sph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, sph.phi - (e.clientY - prevMouse.y) * 0.008));
+            updateCamera();
+        }
+        if (isPanning) {
+            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+            const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+            const scale = sph.r * 0.001;
+            orbitTarget.addScaledVector(right, -(e.clientX - prevMouse.x) * scale);
+            orbitTarget.addScaledVector(up,     (e.clientY - prevMouse.y) * scale);
+            updateCamera();
+        }
+        if (isBoxSelecting) {
+            const rect = el.getBoundingClientRect();
+            const x = Math.min(boxStart.x, e.clientX) - rect.left;
+            const y = Math.min(boxStart.y, e.clientY) - rect.top;
+            boxOverlay.style.left   = x + 'px';
+            boxOverlay.style.top    = y + 'px';
+            boxOverlay.style.width  = Math.abs(e.clientX - boxStart.x) + 'px';
+            boxOverlay.style.height = Math.abs(e.clientY - boxStart.y) + 'px';
+        }
+        prevMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    el.addEventListener('mouseup', e => {
+        if (e.button === 0) isDragging = false;
+        if (e.button === 1) isPanning = false;
+        if (e.button === 2 && isBoxSelecting) {
+            isBoxSelecting = false;
+            boxOverlay.style.display = 'none';
+            if (meshObj) applyBoxSelect(e);
+        }
+    });
+    el.addEventListener('mouseleave', () => {
+        isDragging = false;
+        isPanning = false;
+        if (isBoxSelecting) { isBoxSelecting = false; boxOverlay.style.display = 'none'; }
+    });
     el.addEventListener('wheel', e => { sph.r = Math.max(0.01, sph.r * (1 + e.deltaY * 0.001)); updateCamera(); });
+    el.addEventListener('contextmenu', e => e.preventDefault());
+
+    function applyBoxSelect(e) {
+        const rect = el.getBoundingClientRect();
+        const x0 = Math.min(boxStart.x, e.clientX) - rect.left;
+        const x1 = Math.max(boxStart.x, e.clientX) - rect.left;
+        const y0 = Math.min(boxStart.y, e.clientY) - rect.top;
+        const y1 = Math.max(boxStart.y, e.clientY) - rect.top;
+        if (x1 - x0 < 3 && y1 - y0 < 3) return;
+
+        const W = rect.width, H = rect.height;
+        const posArr = meshObj.geometry.attributes.position.array;
+        const tmp = new THREE.Vector3();
+        let added = 0;
+
+        for (let fi = 0; fi < currentColors.length; fi++) {
+            const b = fi * 9;
+            tmp.set(
+                (posArr[b]   + posArr[b+3] + posArr[b+6]) / 3,
+                (posArr[b+1] + posArr[b+4] + posArr[b+7]) / 3,
+                (posArr[b+2] + posArr[b+5] + posArr[b+8]) / 3
+            );
+            tmp.project(camera);
+            if (tmp.z >= 1) continue;
+            const px = (tmp.x + 1) / 2 * W;
+            const py = (1 - tmp.y) / 2 * H;
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) {
+                if (!selectedFaces.has(fi)) { selectedFaces.add(fi); setFaceColor(fi, HIGHLIGHT); added++; }
+            }
+        }
+        colorAttr.needsUpdate = true;
+        selCountEl.textContent = selectedFaces.size;
+        statusBar.textContent = 'Box selected +' + added + ' faces (' + selectedFaces.size + ' total).';
+    }
 
     const raycaster = new THREE.Raycaster();
     const mouseVec = new THREE.Vector2();
@@ -319,6 +575,7 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
     const currentColors = [];
     const selectedFaces = new Set();
     const HIGHLIGHT = [1.0, 0.9, 0.0];
+    let eyedropperMode = false;
 
     function setFaceColor(fi, rgb) {
         const base = fi * 9;
@@ -348,46 +605,169 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
         selCountEl.textContent = selectedFaces.size;
     }
 
+    function toHex(v) { return Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0'); }
+
+    function pickColorFromFace(fi) {
+        const c = currentColors[fi];
+        const r = Math.round(c[0] * 255);
+        const g = Math.round(c[1] * 255);
+        const b = Math.round(c[2] * 255);
+        document.getElementById('inR').value = r;
+        document.getElementById('inG').value = g;
+        document.getElementById('inB').value = b;
+        document.getElementById('colorPicker').value = '#' + toHex(r) + toHex(g) + toHex(b);
+    }
+
     el.addEventListener('click', e => {
         const dx = e.clientX - mouseDownPos.x, dy = e.clientY - mouseDownPos.y;
         if (dx * dx + dy * dy > 25 || !meshObj) return;
         const rect = el.getBoundingClientRect();
-        mouseVec.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        mouseVec.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        mouseVec.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+        mouseVec.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouseVec, camera);
         const hits = raycaster.intersectObject(meshObj);
-        if (hits.length > 0) toggleFace(hits[0].faceIndex, e.shiftKey);
+        if (!hits.length) return;
+        const fi = hits[0].faceIndex;
+        if (eyedropperMode) {
+            pickColorFromFace(fi);
+            eyedropperMode = false;
+            document.getElementById('btnEye').classList.remove('active');
+            statusBar.textContent = 'Picked color from face ' + fi + '.';
+        } else {
+            toggleFace(fi, e.shiftKey);
+        }
     });
 
-    fetch('/api/mesh').then(r => r.json()).then(data => {
+    // ── Mesh init ──
+    function initMesh(data) {
+        if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); }
+        currentColors.length = 0;
+        selectedFaces.clear();
+
         const F = data.face_count;
         const posArr = new Float32Array(data.positions);
         const colArr = new Float32Array(data.colors);
-        for (let i = 0; i < F; i++) { const b = i * 9; currentColors.push([colArr[b], colArr[b + 1], colArr[b + 2]]); }
+        for (let i = 0; i < F; i++) {
+            const b = i * 9;
+            currentColors.push([colArr[b], colArr[b + 1], colArr[b + 2]]);
+        }
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-        geo.setAttribute('color', new THREE.BufferAttribute(colArr.slice(), 3));
+        geo.setAttribute('color',    new THREE.BufferAttribute(colArr.slice(), 3));
         geo.computeVertexNormals();
         colorAttr = geo.attributes.color;
         const mat = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });
         meshObj = new THREE.Mesh(geo, mat);
         scene.add(meshObj);
+
         const box = new THREE.Box3().setFromObject(meshObj);
         box.getCenter(orbitTarget);
         sph.r = box.getSize(new THREE.Vector3()).length() * 1.5;
+        sph.theta = 0;
+        sph.phi = Math.PI / 2.5;
         updateCamera();
-        totalCountEl.textContent = F;
-        statusBar.textContent = 'Loaded ' + F + ' faces.';
-    }).catch(e => { statusBar.textContent = 'Error: ' + e.message; });
 
-    // color picker <-> RGB sync
+        totalCountEl.textContent = F;
+        selCountEl.textContent = 0;
+        statusBar.textContent = 'Loaded ' + F + ' faces.';
+    }
+
+    // ── File loading ──
+    const RECENT_KEY = 'mp_recent_files';
+
+    function getRecent() {
+        try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+    }
+    function addRecent(path) {
+        const list = getRecent().filter(p => p !== path);
+        list.unshift(path);
+        localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5)));
+        renderRecent();
+    }
+    function renderRecent() {
+        const list = getRecent();
+        const sec = document.getElementById('recentSection');
+        const ul = document.getElementById('recentList');
+        if (!list.length) { sec.style.display = 'none'; return; }
+        sec.style.display = 'block';
+        ul.innerHTML = '';
+        list.forEach(p => {
+            const div = document.createElement('div');
+            div.className = 'recent-item';
+            div.textContent = p;
+            div.title = p;
+            div.onclick = () => { document.getElementById('loadPath').value = p; loadFile(); };
+            ul.appendChild(div);
+        });
+    }
+
+    window.browseFile = function () {
+        const btn = document.getElementById('browseBtn');
+        btn.textContent = '...';
+        btn.disabled = true;
+        fetch('/api/browse', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                btn.textContent = 'Browse';
+                btn.disabled = false;
+                if (data.path) {
+                    document.getElementById('loadPath').value = data.path;
+                    window.loadFile();
+                }
+            })
+            .catch(() => { btn.textContent = 'Browse'; btn.disabled = false; });
+    };
+
+    window.loadFile = function () {
+        const path = document.getElementById('loadPath').value.trim();
+        if (!path) return;
+        const errEl = document.getElementById('loadError');
+        const btn = document.getElementById('loadBtn');
+        errEl.textContent = '';
+        btn.textContent = 'Loading...';
+        btn.disabled = true;
+
+        fetch('/api/load', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path })
+        }).then(r => r.json()).then(data => {
+            btn.textContent = 'Load';
+            btn.disabled = false;
+            if (data.error) { errEl.textContent = data.error; return; }
+            initMesh(data);
+            addRecent(path);
+            document.getElementById('fileInfo').textContent =
+                'In: ' + path + '\\nOut: ' + data.output_path;
+            const overlay = document.getElementById('loadOverlay');
+            overlay.classList.add('hidden');
+            setTimeout(() => { overlay.style.display = 'none'; }, 300);
+        }).catch(e => {
+            btn.textContent = 'Load';
+            btn.disabled = false;
+            errEl.textContent = 'Connection error: ' + e.message;
+        });
+    };
+
+    window.openFileOverlay = function () {
+        const overlay = document.getElementById('loadOverlay');
+        overlay.style.display = 'flex';
+        requestAnimationFrame(() => overlay.classList.remove('hidden'));
+        document.getElementById('loadPath').focus();
+    };
+
+    document.getElementById('loadPath').addEventListener('keydown', e => {
+        if (e.key === 'Enter') window.loadFile();
+    });
+    renderRecent();
+
+    // ── Color picker <-> RGB sync ──
     document.getElementById('colorPicker').addEventListener('input', e => {
         const h = e.target.value;
         document.getElementById('inR').value = parseInt(h.slice(1, 3), 16);
         document.getElementById('inG').value = parseInt(h.slice(3, 5), 16);
         document.getElementById('inB').value = parseInt(h.slice(5, 7), 16);
     });
-    function toHex(v) { return Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0'); }
     ['inR', 'inG', 'inB'].forEach(id => {
         document.getElementById(id).addEventListener('input', () => {
             const r = +document.getElementById('inR').value || 0;
@@ -414,13 +794,25 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
             colorAttr.needsUpdate = true;
             selCountEl.textContent = 0;
             statusBar.textContent = 'Applied to ' + faceList.length + ' faces.';
+            const col = 'rgb(' + r + ',' + g + ',' + b + ')';
+            const fg = (0.299*r + 0.587*g + 0.114*b) > 128 ? '#0d1117' : '#ffffff';
+            document.documentElement.style.setProperty('--ac', col);
+            document.documentElement.style.setProperty('--ac-fg', fg);
+            document.getElementById('appTitle').style.color = col;
+            document.getElementById('loadCard') && (document.getElementById('loadCard').querySelector('h2').style.color = col);
         });
+    };
+
+    const SLIDER_DEFAULTS = {
+        hue:        { id: 'slHue',    valId: 'valHue',    def: '0',   fmt: v => v },
+        brightness: { id: 'slBright', valId: 'valBright', def: '1.0', fmt: v => parseFloat(v).toFixed(2) },
+        saturation: { id: 'slSat',    valId: 'valSat',    def: '1.0', fmt: v => parseFloat(v).toFixed(2) },
     };
 
     window.applyAdjust = function (kind) {
         if (!selectedFaces.size) { statusBar.textContent = 'No faces selected.'; return; }
-        const sliderIds = { hue: 'slHue', brightness: 'slBright', saturation: 'slSat' };
-        const value = parseFloat(document.getElementById(sliderIds[kind]).value);
+        const cfg = SLIDER_DEFAULTS[kind];
+        const value = parseFloat(document.getElementById(cfg.id).value);
         const faceList = Array.from(selectedFaces);
         fetch('/api/adjust', {
             method: 'POST',
@@ -428,6 +820,8 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
             body: JSON.stringify({ face_indices: faceList, kind, value })
         }).then(r => r.json()).then(data => {
             applyRemoteColors(new Float32Array(data.colors));
+            document.getElementById(cfg.id).value = cfg.def;
+            document.getElementById(cfg.valId).textContent = cfg.fmt(cfg.def);
             statusBar.textContent = kind + ' adjusted on ' + faceList.length + ' faces.';
         });
     };
@@ -450,14 +844,31 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
         statusBar.textContent = 'Selection cleared.';
     };
 
+    window.invertSelection = function () {
+        if (!meshObj) return;
+        const newSel = new Set();
+        for (let i = 0; i < currentColors.length; i++) {
+            if (selectedFaces.has(i)) { setFaceColor(i, currentColors[i]); }
+            else { newSel.add(i); setFaceColor(i, HIGHLIGHT); }
+        }
+        selectedFaces.clear();
+        newSel.forEach(i => selectedFaces.add(i));
+        colorAttr.needsUpdate = true;
+        selCountEl.textContent = selectedFaces.size;
+        statusBar.textContent = 'Selection inverted: ' + selectedFaces.size + ' faces.';
+    };
+
     window.undo = function () {
         fetch('/api/undo', { method: 'POST' }).then(r => r.json()).then(data => {
-            if (data.colors) {
-                applyRemoteColors(new Float32Array(data.colors));
-                statusBar.textContent = 'Undo done.';
-            } else {
-                statusBar.textContent = data.status || 'Nothing to undo.';
-            }
+            if (data.colors) { applyRemoteColors(new Float32Array(data.colors)); statusBar.textContent = 'Undo done.'; }
+            else { statusBar.textContent = data.status || 'Nothing to undo.'; }
+        });
+    };
+
+    window.redo = function () {
+        fetch('/api/redo', { method: 'POST' }).then(r => r.json()).then(data => {
+            if (data.colors) { applyRemoteColors(new Float32Array(data.colors)); statusBar.textContent = 'Redo done.'; }
+            else { statusBar.textContent = data.status || 'Nothing to redo.'; }
         });
     };
 
@@ -466,6 +877,29 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
             statusBar.textContent = 'Saved to ' + data.path;
         });
     };
+
+    window.toggleHelp = function () {
+        document.getElementById('helpPanel').classList.toggle('open');
+    };
+
+    window.toggleEyedropper = function () {
+        eyedropperMode = !eyedropperMode;
+        document.getElementById('btnEye').classList.toggle('active', eyedropperMode);
+        statusBar.textContent = eyedropperMode ? 'Eyedropper: click a face to pick its color.' : 'Eyedropper off.';
+    };
+
+    document.addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') { e.preventDefault(); window.undo(); }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Z')) { e.preventDefault(); window.redo(); }
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); window.save(); }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'a') { e.preventDefault(); window.selectAll(); }
+        if (e.key === 'Escape') {
+            document.getElementById('helpPanel').classList.remove('open');
+            window.clearSelection();
+        }
+        if (e.key === 'i' || e.key === 'I') window.invertSelection();
+        if (e.key === 'p' || e.key === 'P') window.toggleEyedropper();
+    });
 
     function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
     animate();
@@ -481,43 +915,20 @@ input[type=color] { width:100%; height:32px; border:1px solid #30363d; border-ra
 </html>"""
 
 
-def launch_viewer(obj_path: str, output_path: str = None, port: int = 5000):
-    """
-    Launch Flask-based 3D color editor in browser.
-
-    Args:
-        obj_path: path to colored .obj file
-        output_path: path to save edited mesh
-        port: local server port
-    """
-    if output_path is None:
-        stem = Path(obj_path).stem
-        output_path = str(Path(obj_path).parent / (stem + "_edited.obj"))
-
-    print(f"Loading mesh from {obj_path} ...")
-    vertices, faces, face_colors = parse_colored_obj(obj_path)
-    print(f"Loaded: {len(vertices)} vertices, {len(faces)} faces")
-
-    _state["editor"] = ColorEditor(vertices, faces, face_colors)
-    _state["output_path"] = output_path
-    _state["history"] = []
+def launch_viewer(port: int = 5000):
+    """Launch Flask-based 3D color editor in browser."""
 
     def _open():
         import time
 
-        time.sleep(1.5)
+        time.sleep(1.0)
         webbrowser.open(f"http://localhost:{port}")
 
     threading.Thread(target=_open, daemon=True).start()
-
     print(f"\nModelPainter running at http://localhost:{port}")
     print("Press Ctrl+C to quit.\n")
-
     app.run(port=port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
-    launch_viewer(
-        obj_path="./output/mesh/mesh_colored.obj",
-        output_path="./output/mesh/mesh_edited.obj",
-    )
+    launch_viewer()
