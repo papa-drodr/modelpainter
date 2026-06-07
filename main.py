@@ -175,8 +175,8 @@ def main():
     )
     if len(vertices) == 0 or len(faces) == 0:
         raise RuntimeError(
-            "메시 추출 실패: 빈 표면입니다. "
-            "--threshold 값을 낮추거나 NeRF 학습을 더 진행하세요."
+            "Mesh extraction failed: empty surface. "
+            "Lower --threshold or train NeRF for more epochs."
         )
 
     # step 5: color baking

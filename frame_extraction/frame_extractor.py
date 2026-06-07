@@ -114,8 +114,8 @@ def extract_frames(
 
     if failed_count > 0:
         print(
-            f"경고: {failed_count}개 프레임 저장 실패 "
-            f"(요청 {num_frames}개 중 {len(saved_paths)}개 저장됨)"
+            f"Warning: {failed_count} frame(s) failed to save "
+            f"({len(saved_paths)} of {num_frames} requested saved)"
         )
 
     print(f"\nTotal {len(saved_paths)} frames saved -> {output_dir}")

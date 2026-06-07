@@ -173,7 +173,7 @@ def train(
         try:
             ckpt = torch.load(resume_from, map_location=device)
         except (FileNotFoundError, RuntimeError) as e:
-            raise RuntimeError(f"체크포인트 로딩 실패: {e}")
+            raise RuntimeError(f"Failed to load checkpoint: {e}")
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = ckpt["epoch"]
